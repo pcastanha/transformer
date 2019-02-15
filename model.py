@@ -147,3 +147,14 @@ class MultiHeadedAttention(nn.Module):
         x, self.attn = attention(q, k, v, mask, dropout=self.dropout)
         x = x.transpose(1, 2).contiguous().view(n_batches, -1, self.h * self.d_k)
         return self.linears[-1](x)
+
+
+class PositionWiseFeedForward(nn.Module):
+    def __init__(self, d_model, d_ff, dropout=0.1):
+        super(PositionWiseFeedForward, self).__init__()
+        self.w_1 = nn.Linear(d_model, d_ff)
+        self.w_2 = nn.Linear(d_ff, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.w_2(self.dropout(F.relu(self.w_1)))
