@@ -158,3 +158,30 @@ class PositionWiseFeedForward(nn.Module):
 
     def forward(self, x):
         return self.w_2(self.dropout(F.relu(self.w_1)))
+
+
+class Embedding(nn.Module):
+    def __init__(self, model_dim, vocab_size):
+        super(Embedding, self).__init__()
+        self.emb = nn.Embedding(vocab_size, model_dim)
+        self.model_dim = model_dim
+
+    def forward(self, x):
+        return self.emb(x) * math.sqrt(self.model_dim)
+
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, model_dim, dropout, max_len=7000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        position_encoding = torch.zeros(max_len, model_dim)
+        position = torch.arange(0., max_len).unsqueeze(1)
+        div = torch.exp(torch.arange(0., model_dim, 2) * -(math.log(10000.0) / model_dim))
+        position_encoding[:, 0::2] = torch.sin(position * div)
+        position_encoding[:, 1::2] = torch.cos(position * div)
+        position_encoding = position_encoding.unsqueeze(0)
+        self.register_buffer('pe', position_encoding)
+
+    def forward(self, x):
+        x = x + Variable(self.pe[:, :x.size(1)], requires_grad=False)
+        return self.dropout(x)
