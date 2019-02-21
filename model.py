@@ -158,7 +158,7 @@ class PositionWiseFeedForward(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.w_2(self.dropout(F.relu(self.w_1)))
+        return self.w_2(self.dropout(F.relu(self.w_1(x))))
 
 
 class Embedding(nn.Module):
@@ -213,7 +213,7 @@ class Batch(object):
             self.tgt = tgt[:, :-1]
             self.tgt_y = tgt[:, 1:]
             self.tgt_mask = self.make_std_mask(self.tgt, pad)
-            self.n_tokens = (self.tgt_y != pad).data.sum()
+            self.n_tokens = (self.tgt_y != pad).data.sum().float()
 
     @staticmethod
     def make_std_mask(tgt, pad):
@@ -234,7 +234,7 @@ def run_epoch(data_iter, model, compute_loss):
         total_tokens += batch.n_tokens
         if i % 100 == 1:
             elapsed = time.time() - start
-            print("Epoch: %d Loss: %f Tokens per Sec: %f".format(i, loss / batch.n_tokens, tokens / elapsed))
+            print("Epoch: {} Loss: {} Tokens per Sec: {}".format(i, loss / batch.n_tokens, tokens / elapsed))
             start = time.time()
             tokens = 0
 
@@ -269,7 +269,7 @@ class NoamOptimizer(object):
     def step(self):
         self._step += 1
         rate = self.rate()
-        for p in self.optimizer.param_groups():
+        for p in self.optimizer.param_groups:
             p['lr'] = rate
         self._rate = rate
         self.optimizer.step()
@@ -286,6 +286,71 @@ def get_std_opt(model):
                          torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9))
 
 
+class LabelSmoothing(nn.Module):
+    def __init__(self, size, padding_idx, smoothing=0.0):
+        super(LabelSmoothing, self).__init__()
+        self.criterion = nn.KLDivLoss(reduction='sum')
+        self.padding_idx = padding_idx
+        self.confidence = 1.0 - smoothing
+        self.smoothing = smoothing
+        self.size = size
+        self.true_dist = None
+
+    def forward(self, x, target):
+        assert x.size(1) == self.size
+        true_dist = x.data.clone()
+        true_dist.fill_(self.smoothing / (self.size - 2))
+        true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
+        true_dist[:, self.padding_idx] = 0
+        mask = torch.nonzero(target.data == self.padding_idx)
+        if mask.sum() > 0 and len(mask) > 0:
+            true_dist.index_fill_(0, mask.squeeze(), 0.0)
+        self.true_dist = true_dist
+
+        return self.criterion(x, Variable(true_dist, requires_grad=False))
+
+
+def synth_data_gen(v, batch, n_batches):
+    for i in range(n_batches):
+        data = torch.from_numpy(np.random.randint(1, v, size=(batch, 10)))
+        data[:, 0] = 1
+        src = Variable(data, requires_grad=False)
+        tgt = Variable(data, requires_grad=False)
+        yield Batch(src, tgt, 0)
+
+
+class ComputeLoss(object):
+    def __init__(self, generator, criterion, opt=None):
+        self.generator = generator
+        self.criterion = criterion
+        self.opt = opt
+
+    def __call__(self, x, y, norm):
+        x = self.generator(x)
+        norm = norm.float()
+        loss = self.criterion(x.contiguous().view(-1, x.size(-1)), y.contiguous().view(-1)) / norm
+        loss.backward()
+        if self.opt is not None:
+            self.opt.step()
+            self.opt.optimizer.zero_grad()
+
+        return loss.data.item() * norm
+
+
 if __name__ == "__main__":
     m = create_model(10, 10, 2)
     print(m)
+
+    V = 11
+    criterion = LabelSmoothing(size=V, padding_idx=0, smoothing=0.0)
+    model = create_model(V, V, n=2)
+    model_opt = NoamOptimizer(model.src_embed[0].model_dim, 1, 400,
+                              torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9))
+
+    for epoch in range(10):
+        model.train()
+        run_epoch(synth_data_gen(V, 30, 20), model,
+                  ComputeLoss(model.generator, criterion, model_opt))
+        model.eval()
+        print(run_epoch(synth_data_gen(V, 30, 5), model,
+                        ComputeLoss(model.generator, criterion, None)).item())
