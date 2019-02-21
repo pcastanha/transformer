@@ -93,6 +93,7 @@ class SublayerConnection(nn.Module):
 class EncoderLayer(nn.Module):
     def __init__(self, size, self_attn, feed_forward, dropout):
         super(EncoderLayer, self).__init__()
+        self.size = size
         self.self_attn = self_attn
         self.feed_forward = feed_forward
         self.sublayer = [SublayerConnection(size, dropout) for _ in range(2)]
@@ -185,3 +186,106 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         x = x + Variable(self.pe[:, :x.size(1)], requires_grad=False)
         return self.dropout(x)
+
+
+def create_model(src_vocab, tgt_vocab, n=6, model_dim=512, ff_dim=2048, h=8, dropout=0.1):
+    c = copy.deepcopy
+    attn = MultiHeadedAttention(h, model_dim)
+    ff = PositionWiseFeedForward(model_dim, ff_dim, dropout)
+    position = PositionalEncoding(model_dim, dropout)
+    model = EncoderDecoder(Encoder(EncoderLayer(model_dim, c(attn), c(ff), dropout), n),
+                           Decoder(DecoderLayer(model_dim, c(attn), c(attn), c(ff), dropout), n),
+                           nn.Sequential(Embedding(model_dim, src_vocab), c(position)),
+                           nn.Sequential(Embedding(model_dim, tgt_vocab), c(position)), Generator(model_dim, tgt_vocab))
+
+    for p in model.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_uniform_(p)
+
+    return model
+
+
+class Batch(object):
+    def __init__(self, src, tgt=None, pad=0):
+        self.src = src
+        self.src_mask = (src != pad).unsqueeze(-2)
+        if tgt is not None:
+            self.tgt = tgt[:, :-1]
+            self.tgt_y = tgt[:, 1:]
+            self.tgt_mask = self.make_std_mask(self.tgt, pad)
+            self.n_tokens = (self.tgt_y != pad).data.sum()
+
+    @staticmethod
+    def make_std_mask(tgt, pad):
+        tgt_mask = (tgt != pad).unsqueeze(-2)
+        tgt_mask = tgt_mask & Variable(subsequent_mask(tgt.size(-1)).type_as(tgt_mask.data))
+        return tgt_mask
+
+
+def run_epoch(data_iter, model, compute_loss):
+    start = time.time()
+    total_tokens = 0
+    total_loss = 0
+    tokens = 0
+    for i, batch in enumerate(data_iter):
+        out = model.forward(batch.src, batch.tgt, batch.src_mask, batch.tgt_mask)
+        loss = compute_loss(out, batch.tgt_y, batch.n_tokens)
+        total_loss += loss
+        total_tokens += batch.n_tokens
+        if i % 100 == 1:
+            elapsed = time.time() - start
+            print("Epoch: %d Loss: %f Tokens per Sec: %f".format(i, loss / batch.n_tokens, tokens / elapsed))
+            start = time.time()
+            tokens = 0
+
+    return total_loss / total_tokens
+
+
+global max_src_in_batch, max_tgt_in_batch
+
+
+def batch_size_fn(new, count):
+    global max_src_in_batch, max_tgt_in_batch
+    if count == 1:
+        max_src_in_batch = 0
+        max_tgt_in_batch = 0
+    max_src_in_batch = max(max_src_in_batch, len(new.src))
+    max_tgt_in_batch = max(max_tgt_in_batch, len(new.tgt) + 2)
+    src_elements = count * max_src_in_batch
+    tgt_elements = count * max_tgt_in_batch
+
+    return max(src_elements, tgt_elements)
+
+
+class NoamOptimizer(object):
+    def __init__(self, model_size, factor, warmup, optimizer):
+        self._step = 0
+        self._rate = 0
+        self.warmup = warmup
+        self.factor = factor
+        self.optimizer = optimizer
+        self.model_size = model_size
+
+    def step(self):
+        self._step += 1
+        rate = self.rate()
+        for p in self.optimizer.param_groups():
+            p['lr'] = rate
+        self._rate = rate
+        self.optimizer.step()
+
+    def rate(self, step=None):
+        if step is None:
+            step = self._step
+
+        return self.factor * self.model_size ** (-0.5) * min(step ** (-0.5), step * self.warmup ** (-1.5))
+
+
+def get_std_opt(model):
+    return NoamOptimizer(model.src_embed[0].model_dim, 2, 4000,
+                         torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9))
+
+
+if __name__ == "__main__":
+    m = create_model(10, 10, 2)
+    print(m)
