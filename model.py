@@ -1,13 +1,18 @@
-import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import math, copy, time
-from torch.autograd import Variable
-import matplotlib.pyplot as plt
 import seaborn
+import spacy
+import numpy as np
+import torch.nn as nn
+import math, copy, time
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+
+from torch.autograd import Variable
+from torchtext import data, datasets
 
 seaborn.set_context(context="talk")
+spacy_en = spacy.load('en')
+spacy_de = spacy.load('de')
 
 
 def subsequent_mask(size):
@@ -320,6 +325,14 @@ def synth_data_gen(v, batch, n_batches):
         yield Batch(src, tgt, 0)
 
 
+def tokenize(text):
+    return [token.text for token in spacy_en.tokenizer(text)]
+
+
+def tokenize_de(text):
+    return [token.text for token in spacy_de.tokenizer(text)]
+
+
 class ComputeLoss(object):
     def __init__(self, generator, criterion, opt=None):
         self.generator = generator
@@ -338,7 +351,43 @@ class ComputeLoss(object):
         return loss.data.item() * norm
 
 
+class Iterator(data.Iterator):
+    def create_batches(self):
+        if self.train:
+            def pool(d, random_shuffler):
+                for p in data.batch(d, self.batch_size * 100):
+                    p_batch = data.batch(
+                        sorted(p, key=self.sort_key),
+                        self.batch_size, self.batch_size_fn
+                    )
+                    for b in random_shuffler(list(p_batch)):
+                        yield b
+        else:
+            self.batches = []
+            for b in data.batch(self.data(), self.batch_size, self.batch_size_fn):
+                self.batches.append(sorted(b, key=self.sort_key))
+
+
+def rebatch(pad_index, batch):
+    src, tgt = batch.src.transpose(0, 1), batch.tgt.transpose(0, 1)
+    return Batch(src, tgt, pad_index)
+
+
 if __name__ == "__main__":
+
+    MIN_FREQ = 2
+    MAX_LEN = 100
+    BOS_TEXT = '<s>'
+    EOS_TEXT = '</s>'
+    BLANK_WORD = '<blank>'
+    SRC = data.Field(tokenize=tokenize_de, pad_token=BLANK_WORD)
+    TGT = data.Field(tokenize=tokenize, init_token=BOS_TEXT, eos_token=EOS_TEXT, pad_token=BLANK_WORD)
+    train, val, test = datasets.IWSLT.splits(
+        exts=('.de', '.en'), fields=(SRC, TGT),
+        filter_pred=lambda x: len(vars(x)['src']) <= MAX_LEN and len(vars(x)['src']) <= MAX_LEN)
+    SRC.build_vocab(train.src, min_freq=MIN_FREQ)
+    TGT.build_vocab(train.trg, min_freq=MIN_FREQ)
+
     m = create_model(10, 10, 2)
     print(m)
 
